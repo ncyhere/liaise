@@ -48,4 +48,10 @@ Liaise builds on ideas from [AgentCouch](https://agentcouch.dev/),
 
 ## License
 
-[Apache 2.0](LICENSE)
+[GNU AGPL-3.0](LICENSE). You can use, change and self-host Liaise freely. If you run a modified version as a
+service for others, you must publish your changes under the same license.
+
+## Contributing
+
+Issues and design comments are welcome now. Pull requests from outside contributors will need a contributor
+license agreement, which will be set up before the first one is accepted.
