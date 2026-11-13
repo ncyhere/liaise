@@ -22,7 +22,27 @@ export interface Rule {
   /** Extra checks on the value (entropy, placeholders, public examples). */
   validate?: (value: string, match: RegExpExecArray, text: string) => boolean;
   /** Extend the reported span past the regex match (e.g. to the end of a key block). */
-  extend?: (match: RegExpExecArray, text: string) => number;
+  extend?: (match: RegExpExecArray, text: string, budget: { spend(chars: number): void }) => number;
+}
+
+/** "-----END" positions in a text, found in one pass and reused for every key header in it. */
+let endIndexText: string | null = null;
+let endIndex: number[] = [];
+function nextEndMarker(text: string, from: number, budget: { spend(chars: number): void }): number {
+  if (endIndexText !== text) {
+    budget.spend(text.length);
+    endIndex = [];
+    for (let i = text.indexOf("-----END"); i >= 0; i = text.indexOf("-----END", i + 8)) endIndex.push(i);
+    endIndexText = text;
+  }
+  let lo = 0;
+  let hi = endIndex.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (endIndex[mid]! < from) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo < endIndex.length ? endIndex[lo]! : -1;
 }
 
 /** Not preceded by a token character. */
@@ -59,12 +79,22 @@ export function looksRandom(value: string, minLength = 16): boolean {
   if (PLACEHOLDER.test(v) || DOTTED_REFERENCE.test(v)) return false;
   if (/^(?:\/|\.\/|~\/|[A-Za-z]:\\)/.test(v) || v.includes("://")) return false;
   if (/^\d+$/.test(v)) return false;
+  // Publishable keys are meant to be public.
+  if (/^pk_(?:live|test)_/.test(v)) return false;
+  // Words joined by dashes ("one-million-per-day") are settings, not secrets: want a digit, mixed
+  // case, or real length.
+  const hasDigit = /[0-9]/.test(v);
+  const mixedCase = /[a-z]/.test(v) && /[A-Z]/.test(v);
+  if (!hasDigit && !mixedCase && v.length < 32) return false;
   return charClasses(v) >= 2 && shannonEntropy(v) >= 3.0;
 }
 
 /** Variable names that suggest a secret: *_KEY, *TOKEN*, *SECRET*, *PASSWORD* and close relatives. */
 export function secretishName(name: string): boolean {
   const n = name.replace(/^["']|["']$/g, "");
+  // Public halves and settings about secrets, not secrets: STRIPE_PUBLISHABLE_KEY, TOKEN_BUDGET, KEY_ID, SECRET_NAME.
+  if (/publishable|public/i.test(n)) return false;
+  if (/(?:^|[_.\-]|[a-z])(?:budget|limit|count|max|min|ttl|expiry|expires|lifetime|length|size|url|uri|endpoint|type|name|id|file|path|header|prefix|format|algorithm|alg|version|timeout|region|issuer|audience|scope)s?$/i.test(n)) return false;
   if (/(?:^|[_.\-])key$/i.test(n) || /[a-z0-9]Key$/.test(n) || /^(?:api|private|secret|access|auth)[_.\-]?key/i.test(n)) return true;
   if (/token/i.test(n) && !/^(?:max|num|n|total|count|input|output)?_?tokens?$/i.test(n) && !/tokeniz/i.test(n)) return true;
   if (/secret/i.test(n) && !/secret[_.\-]?(?:name|ref|id|arn|path|version)$/i.test(n)) return true;
@@ -128,12 +158,12 @@ export const RULES: Rule[] = [
     regex: /-----BEGIN[ A-Z0-9_\-]{0,40}PRIVATE KEY(?: BLOCK)?-----/g,
     // A header alone (in docs or code) is not a key: require key material right after it.
     validate: (_v, m, text) => /[A-Za-z0-9+/]{40}/.test(text.slice(m.index + m[0].length, m.index + m[0].length + 600)),
-    extend: (m, text) => {
+    extend: (m, text, budget) => {
       const start = m.index + m[0].length;
-      const end = text.indexOf("-----END", start);
+      const end = nextEndMarker(text, start, budget);
       if (end >= 0 && end - start < 20000) {
-        const close = text.indexOf("-----", end + 8);
-        return close >= 0 && close - end < 80 ? close + 5 : end + 8;
+        const close = text.lastIndexOf("-----", Math.min(text.length, end + 80));
+        return close > end ? close + 5 : end + 8;
       }
       return Math.min(text.length, start + 600);
     },

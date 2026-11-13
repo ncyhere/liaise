@@ -97,7 +97,7 @@ export function safeReturnTo(value: string | null | undefined): string {
   try {
     const base = "https://liaise.invalid";
     const u = new URL(value, base);
-    if (u.origin !== base) return "/app";
+    if (u.origin !== base || u.pathname.startsWith("//")) return "/app";
     return u.pathname + u.search;
   } catch {
     return "/app";

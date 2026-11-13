@@ -131,3 +131,42 @@ describe("fresh sign-in for raising trust", () => {
     expect(row!.status).toBe("proposed");
   });
 });
+
+describe("Google sign-in freshness", () => {
+  async function googleSignIn(fresh: boolean, claims: Record<string, unknown>): Promise<Response> {
+    const { vi } = await import("vitest");
+    const genv = { ...env, DEV_LOGIN: undefined, GOOGLE_CLIENT_ID: "cid.apps.googleusercontent.com", GOOGLE_CLIENT_SECRET: "test-secret" };
+    const ctx = createExecutionContext();
+    const start = await worker.fetch(new Request(`${ORIGIN}/auth/login?return_to=/app${fresh ? "&fresh=1" : ""}`), genv, ctx);
+    const google = new URL(start.headers.get("location")!);
+    expect(google.searchParams.get("max_age")).toBe(fresh ? "0" : null);
+    const state = google.searchParams.get("state")!;
+    const nonce = google.searchParams.get("nonce")!;
+    const cookie = start.headers.getSetCookie()[0]!.split(";")[0]!;
+    const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
+    const now = Math.floor(Date.now() / 1000);
+    const idToken = `${b64({ alg: "RS256" })}.${b64({ iss: "https://accounts.google.com", aud: genv.GOOGLE_CLIENT_ID, exp: now + 600, nonce, sub: "g-123", email: "g@gamma.example", email_verified: true, ...claims })}.sig`;
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ id_token: idToken }), { headers: { "content-type": "application/json" } }));
+    try {
+      return await worker.fetch(new Request(`${ORIGIN}/auth/callback?state=${encodeURIComponent(state)}&code=c`, { headers: { cookie } }), genv, ctx);
+    } finally {
+      spy.mockRestore();
+    }
+  }
+  const sessionAuthTime = async () =>
+    (await env.DB.prepare("SELECT s.auth_time FROM web_sessions s JOIN people p ON p.id = s.person_id WHERE p.subject = 'g-123' ORDER BY s.rowid DESC LIMIT 1").first<{ auth_time: number }>())!.auth_time;
+
+  it("an ordinary sign-in without auth_time is not fresh", async () => {
+    const res = await googleSignIn(false, {});
+    expect(res.status).toBe(303);
+    expect(await sessionAuthTime()).toBe(0);
+  });
+
+  it("'sign in again' refuses an old authentication and accepts a new one", async () => {
+    const old = await googleSignIn(true, { auth_time: Math.floor(Date.now() / 1000) - 86400 });
+    expect(old.status).toBe(400);
+    const fresh = await googleSignIn(true, { auth_time: Math.floor(Date.now() / 1000) });
+    expect(fresh.status).toBe(303);
+    expect(Math.floor(Date.now() / 1000) - (await sessionAuthTime())).toBeLessThan(5);
+  });
+});

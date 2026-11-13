@@ -130,7 +130,8 @@ async function finishGoogle(request: Request, env: Env, url: URL): Promise<Respo
   const person = await upsertPerson(env.DB, "google", claims.sub, claims.email, typeof claims.name === "string" ? claims.name : "");
   const headers = new Headers({ location: safeReturnTo(attempt.return_to), "cache-control": "no-store" });
   await endPreviousSession(request, env);
-  headers.append("set-cookie", await createSession(env, person.id, attempt.fresh ? (authTime ?? undefined) : undefined));
+  // Fresh means a verified recent authentication: an ordinary sign-in without auth_time never is.
+  headers.append("set-cookie", await createSession(env, person.id, authTime ?? 0));
   headers.append("set-cookie", setCookie(env, "login", "", 0));
   return new Response(null, { status: 303, headers });
 }

@@ -28,7 +28,8 @@ export async function authorizePage(request: Request, env: Env, url: URL): Promi
   // Sign-in comes first, so an anonymous request cannot make the Worker fetch a client's metadata.
   const session = await getSession(request, env);
   const here = url.pathname + url.search;
-  if (!session) return redirect(loginUrl(here));
+  // Approving a client needs a fresh sign-in, so ask for one straight away.
+  if (!session) return redirect(loginUrl(here, true));
   let authRequest: AuthRequest;
   let described: ConsentDescription;
   try {
@@ -125,7 +126,8 @@ export async function consentSubmit(request: Request, env: Env): Promise<Respons
   if (!isFresh(session)) return page("Sign in again", html`<h1>Sign in again to connect an agent</h1>`, { status: 403 });
 
   const trust = form.get("trust") === "read_only" ? "read_only" : "gated";
-  const label = String(form.get("label") ?? "");
+  // Scan exactly the label that will be stored and shown to others.
+  const label = safeLabel(String(form.get("label") ?? "")) || safeLabel(params.clientName) || "Agent";
   try {
     refuseSecretMetadata("label", label);
   } catch (e) {

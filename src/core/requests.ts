@@ -157,11 +157,12 @@ export async function removeRoomGrant(env: Env, personId: string, roomId: string
   ]);
 }
 
-/** Stops trusting someone in every room (removes their allowlist entry). */
+/** Stops trusting someone anywhere: removes the allowlist entry and every room grant for them. */
 export async function removeAllowlistEntry(env: Env, personId: string, targetId: string): Promise<void> {
   const db = env.DB;
   await runBatch(db, [
     db.prepare("DELETE FROM allowlist WHERE owner_id = ? AND person_id = ?").bind(personId, targetId),
+    db.prepare("DELETE FROM room_grants WHERE granter_id = ? AND person_id = ?").bind(personId, targetId),
     auditStmt(db, { person: personId, action: "allowlist.remove", target: targetId }),
   ]);
 }

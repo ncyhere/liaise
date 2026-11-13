@@ -74,6 +74,9 @@ export function mustCatch(): [string, string, string][] {
     ["fullwidth characters", fullwidth, "anthropic-api-key"],
     ["percent-encoded", [...stripe].map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join(""), "stripe-secret-key"],
     ["inside a code fence", "```bash\n" + j("export GITHUB_TOKEN=", ghp) + "\n```", "github-token"],
+    ["percent-encoded with zero-width characters", [...stripe].map((c) => encodeURIComponent(c + "\u200B")).join(""), "stripe-secret-key"],
+    ["percent-encoded full-width characters", encodeURIComponent(fullwidth), "anthropic-api-key"],
+    ["base64 of percent-encoded", b64([...stripe].map((c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0")).join("")), "stripe-secret-key"],
   ];
 }
 
@@ -100,6 +103,8 @@ export function mustPass(): [string, string][] {
     ["k8s secret name", "tls:\n  secretName: my-tls-secret\n  secretKeyRef: api-credentials"],
     ["private key header in docs", "Paste the file that starts with -----BEGIN PRIVATE KEY----- into the field."],
     ["long words", "Supercalifragilisticexpialidocious ".repeat(40)],
+    ["publishable key assignment", `STRIPE_PUBLISHABLE_KEY=pk_live_${alnum(24)}`],
+    ["settings named after tokens", "TOKEN_BUDGET=one-million-per-day\nSECRET_NAME=prod-database-credentials\nAPI_KEY_ID=key_2026_rotation_b"],
     ["markdown table of hashes", `| file | sha1 |\n|---|---|\n| a.txt | ${hex(40)} |\n| b.txt | ${hex(40)} |`],
   ];
 }
@@ -138,6 +143,8 @@ export function adversarial(): [string, string][] {
     ["many short base64 blocks", fill("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWZn ")],
     ["fullwidth", fill("ｓｋ－ａｎｔ－")],
     ["dashes", fill("-")],
+    ["key headers with material, no END", fill("-----BEGIN PRIVATE KEY-----\n" + "A".repeat(40) + "\n")],
+    ["trailing spaces then text", "a" + " ".repeat(n - 2) + "!"],
     ["equals", fill("=")],
   ];
 }

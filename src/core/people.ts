@@ -2,6 +2,7 @@ import type { Env } from "../env";
 import { fail, runBatch } from "./errors";
 import { auditStmt } from "./infra";
 import { LIMITS, type Connection, type Person } from "./model";
+import { checkPost } from "./secrets/check";
 import { newId, normalizeEmail, now, oneLine, safeLabel } from "./util";
 
 /** Finds or creates the person for a provider subject. Email and name are refreshed on each sign-in. */
@@ -45,15 +46,17 @@ export async function createConnection(
 ): Promise<Connection> {
   const id = newId("conn");
   const t = now();
-  const label = safeLabel(c.label) || safeLabel(c.clientName) || "Agent";
+  // The client chooses its own name; one that looks like a secret is not stored or audited.
+  const clientName = checkPost(c.clientName, []).hold ? "(name withheld: it looked like a secret)" : oneLine(c.clientName, 100);
+  const label = safeLabel(c.label) || "Agent";
   await runBatch(db, [
     db
       .prepare(
         `INSERT INTO connections (id, person_id, client_id, client_name, client_domain, redirect_uri, label, trust, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .bind(id, personId, c.clientId, oneLine(c.clientName, 100), c.clientDomain ?? null, c.redirectUri, label, c.trust, t, t + LIMITS.connectionMaxAge),
-    auditStmt(db, { person: personId, connection: id, action: "connection.create", detail: oneLine(c.clientName, 100) }),
+      .bind(id, personId, c.clientId, clientName, c.clientDomain ?? null, c.redirectUri, label, c.trust, t, t + LIMITS.connectionMaxAge),
+    auditStmt(db, { person: personId, connection: id, action: "connection.create", detail: clientName }),
   ]);
   const row = await db.prepare("SELECT * FROM connections WHERE id = ?").bind(id).first<Connection>();
   return row!;

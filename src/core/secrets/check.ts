@@ -1,5 +1,5 @@
 import { keyedHash } from "../util";
-import { maskValue, scanText, type Finding } from "./scan";
+import { maskValue, scanText } from "./scan";
 
 export { RULES_VERSION } from "./scan";
 
@@ -36,30 +36,55 @@ export interface CheckResult {
 /** The rule name used when the scanner could not finish: the post is held anyway. */
 export const SCAN_FAILED_RULE = "scanner-limit";
 
+/** Each joined window holds at most this much earlier text before the new post. */
+const WINDOW_CONTEXT_CHARS = 16 * 1024;
+
 /**
- * Checks a new post on its own, and joined to the same person's recent posts in the room. A match
- * in the joined text counts only if it overlaps the new post, so a secret split across posts is
- * caught without re-holding something already in an earlier post. Never throws: any scanner
- * error holds the post.
+ * Checks a new post on its own, and in windows that start at each of the same person's recent
+ * posts in the room and run to the end of the new post. Starting a window at every earlier post
+ * means unrelated text before a split secret cannot hide it. A match in a window counts only if
+ * it overlaps the new post, so something already in an earlier post is not held again. Never
+ * throws: any scanner error holds the post.
  */
 export function checkPost(body: string, context: Segment[]): CheckResult {
   const segments: Segment[] = [...context, { id: null, text: body }];
   const newIndex = segments.length - 1;
   const matches: SecretMatch[] = [];
+  const seen = new Set<string>();
+  const add = (rule: string, value: string, ranges: Range[]) => {
+    const k = `${rule}\u0000${value}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    matches.push({ rule, value, ranges });
+  };
   try {
-    for (const f of scanText(body)) matches.push({ rule: f.rule, value: f.value, ranges: [{ segment: newIndex, start: f.start, end: f.end }] });
-    if (context.length > 0) {
-      const offsets: number[] = [];
-      let joined = "";
-      for (const s of segments) {
-        offsets.push(joined.length);
-        joined += s.text;
-      }
-      const newStart = offsets[newIndex]!;
-      for (const f of scanText(joined)) {
-        if (f.end <= newStart) continue; // entirely in earlier posts
-        if (f.start >= newStart && matches.some((m) => m.rule === f.rule && m.value === f.value)) continue;
-        matches.push({ rule: f.rule, value: f.value, ranges: splitRange(f, segments, offsets) });
+    for (const f of scanText(body)) add(f.rule, f.value, [{ segment: newIndex, start: f.start, end: f.end }]);
+    // Offsets of every segment in the full concatenation.
+    const offsets: number[] = [];
+    let total = 0;
+    for (const s of segments) {
+      offsets.push(total);
+      total += s.text.length;
+    }
+    const newStart = offsets[newIndex]!;
+    let previousStart = -1;
+    for (let j = 0; j < context.length; j++) {
+      const windowStart = Math.max(offsets[j]!, newStart - WINDOW_CONTEXT_CHARS);
+      if (windowStart === previousStart) continue;
+      previousStart = windowStart;
+      let text = "";
+      for (let i = j; i < segments.length; i++) text += segments[i]!.text;
+      text = text.slice(windowStart - offsets[j]!);
+      const earlierOnly = text.slice(0, newStart - windowStart);
+      // Matches the earlier posts already contain on their own: a token at the end of an earlier
+      // post would otherwise "extend" into the first letters of the new post and hold it again.
+      const already = new Set(scanText(earlierOnly).map((f) => `${f.rule}@${f.start}`));
+      for (const f of scanText(text)) {
+        const start = f.start + windowStart;
+        const end = f.end + windowStart;
+        if (end <= newStart) continue; // entirely in earlier posts
+        if (start < newStart && already.has(`${f.rule}@${f.start}`)) continue;
+        add(f.rule, f.value, splitRange(start, end, segments, offsets));
       }
     }
   } catch {
@@ -71,14 +96,14 @@ export function checkPost(body: string, context: Segment[]): CheckResult {
   return { hold: matches.length > 0, matches, rules, contributing };
 }
 
-function splitRange(f: Finding, segments: Segment[], offsets: number[]): Range[] {
+function splitRange(start: number, end: number, segments: Segment[], offsets: number[]): Range[] {
   const out: Range[] = [];
   segments.forEach((s, i) => {
     const a = offsets[i]!;
     const b = a + s.text.length;
-    const start = Math.max(f.start, a);
-    const end = Math.min(f.end, b);
-    if (end > start) out.push({ segment: i, start: start - a, end: end - a });
+    const lo = Math.max(start, a);
+    const hi = Math.min(end, b);
+    if (hi > lo) out.push({ segment: i, start: lo - a, end: hi - a });
   });
   return out;
 }

@@ -275,7 +275,7 @@ async function roomPage(env: Env, s: WebSession, roomId: string): Promise<Respon
           : ""}
         ${src.allowlist
           ? html`<span class="pill">trusted in every room</span>
-              <form class="inline" method="post" action="/app/rooms/${room.id}/allowlist/${x.person_id}/remove">${csrfField(s)}<button class="small">Stop in every room</button></form>`
+              <form class="inline" method="post" action="/app/rooms/${room.id}/allowlist/${x.person_id}/remove">${csrfField(s)}<button class="small">Stop everywhere</button></form>`
           : ""}
       </td></tr>`;
     })}</table>

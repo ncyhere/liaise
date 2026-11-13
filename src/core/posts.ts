@@ -92,7 +92,11 @@ export async function sendMessage(
   ctx?: { waitUntil(p: Promise<unknown>): void },
 ): Promise<SendResult> {
   if (actor.connection.trust === "read_only") fail("read_only");
-  const body = stripInvisible(input.body).replace(/^\n+|\s+$/g, "");
+  // trimEnd and a loop, not a regex: /\s+$/ is quadratic on long runs of spaces.
+  let body = stripInvisible(input.body).trimEnd();
+  let lead = 0;
+  while (body.charCodeAt(lead) === 10) lead++;
+  body = body.slice(lead);
   if (!body.trim()) fail("invalid_input", "The message body is empty.");
   if (byteLength(body) > LIMITS.messageBytes) fail("too_large", `Messages are limited to ${LIMITS.messageBytes} bytes.`);
   if (!IDEMPOTENCY_KEY_RE.test(input.idempotency_key)) {
@@ -128,20 +132,22 @@ export async function sendMessage(
       .first<{ id: string }>();
     if (held) return blocked(env, room.id, held.id);
 
-    // The secret check: this post alone, and joined to this person's last posts in the room.
-    const recent = await db
-      .prepare(
-        `SELECT id, body, body_hash FROM posts
-          WHERE room_id = ? AND author_id = ? AND kind = 'message' AND status IN ('published', 'held') AND body != '' AND created_at > ?
-          ORDER BY rowid DESC LIMIT ${CONTEXT_POSTS}`,
-      )
-      .bind(room.id, actor.person.id, t - CONTEXT_SECONDS)
-      .all<{ id: string; body: string; body_hash: string }>();
-    const latest = await db
-      .prepare("SELECT id FROM posts WHERE room_id = ? AND author_id = ? AND kind = 'message' ORDER BY rowid DESC LIMIT 1")
-      .bind(room.id, actor.person.id)
-      .first<{ id: string }>();
-    const context: Segment[] = recent.results.reverse().map((r) => ({ id: r.id, text: r.body, h: r.body_hash }));
+    // The secret check: this post alone, and joined to this person's last posts in the room. The
+    // context and the "latest post" marker come from one snapshot (one batch is one transaction),
+    // and the publish below is conditional on that marker.
+    const [recentRes, latestRes] = await db.batch([
+      db
+        .prepare(
+          `SELECT id, body, body_hash FROM posts
+            WHERE room_id = ? AND author_id = ? AND kind = 'message' AND status IN ('published', 'held') AND body != '' AND created_at > ?
+            ORDER BY rowid DESC LIMIT ${CONTEXT_POSTS}`,
+        )
+        .bind(room.id, actor.person.id, t - CONTEXT_SECONDS),
+      db.prepare("SELECT id FROM posts WHERE room_id = ? AND author_id = ? AND kind = 'message' ORDER BY rowid DESC LIMIT 1").bind(room.id, actor.person.id),
+    ]);
+    const recent = (recentRes!.results ?? []) as { id: string; body: string; body_hash: string }[];
+    const latest = ((latestRes!.results ?? [])[0] ?? null) as { id: string } | null;
+    const context: Segment[] = recent.reverse().map((r) => ({ id: r.id, text: r.body, h: r.body_hash }));
     const check = checkPost(body, context);
     const auditDetail = check.hold ? await auditSummary(env.HASH_KEY, check) : null;
 
