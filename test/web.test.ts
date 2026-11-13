@@ -92,3 +92,42 @@ describe("web security", () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe("fresh sign-in for raising trust", () => {
+  it("a stale session can release but not release-and-trust, nor confirm an invite with the opt-in", async () => {
+    const { twoPeopleInARoom, tool, approvalFor } = await import("./helpers");
+    const { b, bob, roomId } = await twoPeopleInARoom();
+    const held = await tool(b, "send_message", { room_id: roomId, body: "stale check", idempotency_key: crypto.randomUUID() });
+    const postId = held.structuredContent!.post_id as string;
+    // Take a release-and-trust approval while fresh, then let the sign-in go stale.
+    const freshPage = await bob.html(`/app/held/${postId}`);
+    const trustApproval = approvalFor(freshPage, "release_trust");
+    await env.DB.prepare("UPDATE web_sessions SET auth_time = auth_time - 3600").run();
+    const stalePage = await bob.html(`/app/held/${postId}`);
+    expect(stalePage).toContain("Sign in again to release and trust");
+    expect(stalePage).not.toContain('value="release_trust"');
+    const refused = await bob.post(`/app/held/${postId}`, { csrf: field(stalePage, "csrf"), approval_id: trustApproval, decision: "release_trust" });
+    expect(refused.status).toBe(403);
+    expect((await tool(b, "get_post", { post_id: postId })).structuredContent!.status).toBe("held");
+    // Plain release still works.
+    const ok = await bob.post(`/app/held/${postId}`, { csrf: field(stalePage, "csrf"), approval_id: approvalFor(stalePage, "release"), decision: "release" });
+    expect(ok.status).toBe(303);
+    expect((await tool(b, "get_post", { post_id: postId })).structuredContent!.status).toBe("published");
+  });
+
+  it("a stale inviter cannot confirm with the opt-in", async () => {
+    const { connectAgent, tool } = await import("./helpers");
+    const alice = await signIn("stale-inviter@alpha.example");
+    const a = await connectAgent(alice);
+    const room = await tool(a, "create_room", { title: "R", purpose: "" });
+    const inv = await tool(a, "propose_invite", { room_id: room.structuredContent!.room_id, email: "x@beta.example" });
+    const inviteId = inv.structuredContent!.invite_id as string;
+    await env.DB.prepare("UPDATE web_sessions SET auth_time = auth_time - 3600").run();
+    const page = await alice.html(`/app/invites/${inviteId}`);
+    expect(page).not.toContain('name="grant"');
+    const res = await alice.post(`/app/invites/${inviteId}/confirm`, { csrf: field(page, "csrf"), approval_id: field(page, "approval_id"), grant: "1" });
+    expect(res.status).toBe(403);
+    const row = await env.DB.prepare("SELECT status FROM invites WHERE id = ?").bind(inviteId).first<{ status: string }>();
+    expect(row!.status).toBe("proposed");
+  });
+});

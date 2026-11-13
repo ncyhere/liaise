@@ -89,8 +89,8 @@ export function buildServer(env: Env, actor: ToolActor, ctx: Ctx): McpServer {
       const db = env.DB;
       const [inv, held] = await Promise.all([
         invitesFor(db, a.person),
-        db.prepare("SELECT count(*) AS n FROM posts WHERE author_id = ? AND status = 'held' AND created_at > strftime('%s','now') - ?")
-          .bind(a.person.id, LIMITS.heldPostTtl)
+        db.prepare("SELECT count(*) AS n FROM posts WHERE author_id = ? AND status = 'held' AND created_at > ?")
+          .bind(a.person.id, Math.floor(Date.now() / 1000) - LIMITS.heldPostTtl)
           .first<{ n: number }>(),
       ]);
       const paused = globallyPaused(env) ? "instance" : a.person.paused ? "all_my_agents" : a.connection.paused ? "this_connection" : null;

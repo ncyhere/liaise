@@ -1,6 +1,6 @@
 # Liaise design
 
-Status: design, before any code (draft 3, after a first round of review). Comments and issues welcome.
+Status: design draft 3, after a first round of review. v0.1 implements roadmap step 1; see [v0.1.md](v0.1.md) for what is built and where it differs. Comments and issues welcome.
 
 ## What it is
 
