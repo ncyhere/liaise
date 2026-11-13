@@ -1,7 +1,7 @@
 import type { Env } from "../env";
 import { approvalValidSql, loadApproval } from "./approvals";
 import { assertStmt, fail, runBatch, stmt } from "./errors";
-import { auditStmt, hitWriteRates, sendNotice } from "./infra";
+import { auditStmt, hitRate, hitWriteRates, RATES, sendNotice } from "./infra";
 import { CONNECTION_ACTIVE_SQL, LIMITS, type Person, type Room } from "./model";
 import { membersOf, roomForMember, type Member } from "./rooms";
 import { newId, normalizeEmail, now, oneLine, randomToken, sha256 } from "./util";
@@ -53,6 +53,7 @@ export async function proposeInvite(
   if (members.some((m) => m.email === email)) fail("already_member", "That person is already in this room.");
   if (members.length >= room.max_members) fail("room_full");
   if (connectionId) await hitWriteRates(db, inviter.id, connectionId);
+  else await hitRate(db, `web:w:${inviter.id}`, RATES.webWritesPerPersonPerMinute, 60);
 
   const t = now();
   await stmt(db, EXPIRE_ROOM_INVITES_SQL, [room.id, t]).run();
@@ -112,9 +113,11 @@ export async function confirmInvite(
   sessionHash: string,
   approvalId: string,
   inviterGrant: boolean,
+  expectedInviteId: string,
 ): Promise<{ invite_id: string; link: string }> {
   const db = env.DB;
   const params = await loadApproval<{ invite_id: string; room_id: string }>(db, approvalId, personId, sessionHash, "invite.confirm");
+  if (params.invite_id !== expectedInviteId) fail("approval_invalid");
   const token = randomToken();
   const tokenHash = await sha256(token);
   const t = now();
@@ -210,6 +213,7 @@ export async function acceptInvite(
   sessionHash: string,
   approvalId: string,
   inviteeGrant: boolean,
+  expectedInviteId: string,
   ctx?: { waitUntil(p: Promise<unknown>): void },
 ): Promise<{ room_id: string; seq: number }> {
   const db = env.DB;
@@ -220,6 +224,7 @@ export async function acceptInvite(
     sessionHash,
     "invite.accept",
   );
+  if (params.invite_id !== expectedInviteId) fail("approval_invalid");
   const room = await db.prepare("SELECT * FROM rooms WHERE id = ?").bind(params.room_id).first<Room>();
   if (!room) fail("invite_invalid");
   const t = now();
@@ -247,6 +252,12 @@ export async function acceptInvite(
       ...b,
     ),
     assertStmt(db, "NOT EXISTS (SELECT 1 FROM memberships WHERE room_id = ?4 AND person_id = ?1)", "already_member", ...b),
+    assertStmt(
+      db,
+      `(SELECT count(*) FROM memberships WHERE person_id = ?1 AND left_at IS NULL) < ${LIMITS.roomsPerPerson}`,
+      "limit_reached",
+      ...b,
+    ),
     assertStmt(
       db,
       "(SELECT count(*) FROM memberships WHERE room_id = ?4 AND left_at IS NULL) < (SELECT max_members FROM rooms WHERE id = ?4)",

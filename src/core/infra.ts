@@ -26,6 +26,10 @@ export const RATES = {
   registrationsPerIpPerHour: 20,
   registrationsGlobalPerHour: 300,
   signInsPerIpPerHour: 60,
+  authorizePerIpPerHour: 120,
+  postsPerPersonPerDay: 2000,
+  waitsPerConnectionPerMinute: 30,
+  webWritesPerPersonPerMinute: 30,
 };
 
 export async function hitWriteRates(db: D1Database, personId: string, connectionId: string): Promise<void> {

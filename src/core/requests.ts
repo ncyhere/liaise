@@ -111,10 +111,12 @@ export async function decideRequest(
   sessionHash: string,
   approvalId: string,
   decision: "approve" | "decline",
+  expectedRequestId: string,
 ): Promise<void> {
   const db = env.DB;
   const action = `request.${decision}`;
   const params = await loadApproval<{ request_id: string }>(db, approvalId, personId, sessionHash, action);
+  if (params.request_id !== expectedRequestId) fail("approval_invalid");
   const req = await db
     .prepare("SELECT * FROM allowlist_requests WHERE id = ? AND owner_id = ?")
     .bind(params.request_id, personId)
@@ -152,5 +154,14 @@ export async function removeRoomGrant(env: Env, personId: string, roomId: string
   await runBatch(db, [
     db.prepare("DELETE FROM room_grants WHERE room_id = ? AND granter_id = ? AND person_id = ?").bind(roomId, personId, targetId),
     auditStmt(db, { person: personId, action: "grant.remove", room: roomId, target: targetId }),
+  ]);
+}
+
+/** Stops trusting someone in every room (removes their allowlist entry). */
+export async function removeAllowlistEntry(env: Env, personId: string, targetId: string): Promise<void> {
+  const db = env.DB;
+  await runBatch(db, [
+    db.prepare("DELETE FROM allowlist WHERE owner_id = ? AND person_id = ?").bind(personId, targetId),
+    auditStmt(db, { person: personId, action: "allowlist.remove", target: targetId }),
   ]);
 }

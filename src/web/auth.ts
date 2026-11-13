@@ -2,7 +2,7 @@ import type { Env } from "../env";
 import { LiaiseError } from "../core/errors";
 import { hitRate, RATES } from "../core/infra";
 import { upsertPerson } from "../core/people";
-import { base64url, base64urlDecode, isLoopbackHost, now, randomToken, sha256, timingSafeEqual } from "../core/util";
+import { base64url, base64urlDecode, emailDomain, isLoopbackHost, normalizeEmail, now, randomToken, sha256, timingSafeEqual } from "../core/util";
 import { html, page, redirect } from "./html";
 import { cookieName, createSession, destroySession, getSession, readCookie, safeReturnTo, setCookie, checkedForm } from "./session";
 
@@ -26,9 +26,14 @@ export async function handleAuth(request: Request, env: Env, url: URL): Promise<
   const ip = request.headers.get("cf-connecting-ip") ?? "local";
   switch (url.pathname) {
     case "/auth/login": {
-      await hitRate(env.DB, `signin:${ip}`, RATES.signInsPerIpPerHour, 3600);
+      try {
+        await hitRate(env.DB, `signin:${ip}`, RATES.signInsPerIpPerHour, 3600);
+      } catch {
+        return page("Too many sign-ins", html`<h1>Too many sign-in attempts</h1><p>Wait a while and try again.</p>`, { status: 429 });
+      }
       const returnTo = safeReturnTo(url.searchParams.get("return_to"));
-      if (googleEnabled(env)) return startGoogle(env, returnTo);
+      const fresh = url.searchParams.get("fresh") === "1";
+      if (googleEnabled(env)) return startGoogle(env, returnTo, fresh);
       if (devLoginEnabled(env)) return redirect(`/auth/dev-login?return_to=${encodeURIComponent(returnTo)}`);
       return page("Sign-in not configured", html`<h1>Sign-in is not configured</h1>
         <p>The operator has not set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET. See docs/deploy.md.</p>`, { status: 503 });
@@ -48,16 +53,16 @@ export async function handleAuth(request: Request, env: Env, url: URL): Promise<
   return page("Not found", html`<h1>Not found</h1>`, { status: 404 });
 }
 
-async function startGoogle(env: Env, returnTo: string): Promise<Response> {
+async function startGoogle(env: Env, returnTo: string, fresh: boolean): Promise<Response> {
   const state = randomToken();
   const nonce = randomToken();
   const verifier = randomToken(48);
   const challenge = base64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   const t = now();
   await env.DB.prepare(
-    "INSERT INTO login_attempts (state_hash, nonce, verifier, return_to, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO login_attempts (state_hash, nonce, verifier, return_to, fresh, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(await sha256(state), nonce, verifier, returnTo, t, t + 600)
+    .bind(await sha256(state), nonce, verifier, returnTo, fresh ? 1 : 0, t, t + 600)
     .run();
   const u = new URL(GOOGLE_AUTH);
   u.searchParams.set("client_id", env.GOOGLE_CLIENT_ID!);
@@ -68,8 +73,10 @@ async function startGoogle(env: Env, returnTo: string): Promise<Response> {
   u.searchParams.set("nonce", nonce);
   u.searchParams.set("code_challenge", challenge);
   u.searchParams.set("code_challenge_method", "S256");
-  // Always show the account chooser: every sign-in, including "sign in again", is a deliberate click.
+  // Always show the account chooser. "Sign in again" also asks Google to re-authenticate the person
+  // (max_age=0), and the callback checks the returned auth_time.
   u.searchParams.set("prompt", "select_account");
+  if (fresh) u.searchParams.set("max_age", "0");
   // The state is also kept in a cookie so a sign-in started in another browser cannot be finished here.
   return redirect(u.toString(), { "set-cookie": setCookie(env, "login", state, 600) });
 }
@@ -85,7 +92,7 @@ async function finishGoogle(request: Request, env: Env, url: URL): Promise<Respo
   const stateHash = await sha256(state);
   const attempt = await env.DB.prepare("DELETE FROM login_attempts WHERE state_hash = ? AND expires_at > ? RETURNING *")
     .bind(stateHash, now())
-    .first<{ nonce: string; verifier: string; return_to: string }>();
+    .first<{ nonce: string; verifier: string; return_to: string; fresh: number; created_at: number }>();
   if (!attempt) return bad("The sign-in expired. Please try again.");
 
   const tokenRes = await fetch(GOOGLE_TOKEN, {
@@ -114,12 +121,39 @@ async function finishGoogle(request: Request, env: Env, url: URL): Promise<Respo
   if (typeof claims.nonce !== "string" || !timingSafeEqual(claims.nonce, attempt.nonce)) return bad("The sign-in could not be verified.");
   if (typeof claims.sub !== "string" || !claims.sub) return bad("No account id.");
   if (claims.email_verified !== true || typeof claims.email !== "string") return bad("Liaise needs a Google account with a verified email address.");
+  const authTime = typeof claims.auth_time === "number" ? claims.auth_time : null;
+  if (attempt.fresh && (authTime === null || authTime < attempt.created_at - 60)) return bad("Google did not ask you to sign in again. Please try again.");
+  if (!(await mayUseInstance(env, "google", claims.sub, claims.email))) {
+    return bad("This Liaise instance is open to invited people only. Ask the person who invited you to send the invite to this address.");
+  }
 
   const person = await upsertPerson(env.DB, "google", claims.sub, claims.email, typeof claims.name === "string" ? claims.name : "");
   const headers = new Headers({ location: safeReturnTo(attempt.return_to), "cache-control": "no-store" });
-  headers.append("set-cookie", await createSession(env, person.id));
+  await endPreviousSession(request, env);
+  headers.append("set-cookie", await createSession(env, person.id, attempt.fresh ? (authTime ?? undefined) : undefined));
   headers.append("set-cookie", setCookie(env, "login", "", 0));
   return new Response(null, { status: 303, headers });
+}
+
+/**
+ * With SIGNUP_ALLOWLIST set, only listed emails or @domains may sign up. People who already have
+ * an account, and people holding a confirmed invite, may always sign in.
+ */
+async function mayUseInstance(env: Env, provider: string, subject: string, rawEmail: string): Promise<boolean> {
+  const list = (env.SIGNUP_ALLOWLIST ?? "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (list.length === 0) return true;
+  const email = normalizeEmail(rawEmail);
+  if (!email) return false;
+  if (list.includes(email) || list.includes(`@${emailDomain(email)}`)) return true;
+  const known = await env.DB.prepare("SELECT 1 FROM people WHERE provider = ? AND subject = ?").bind(provider, subject).first();
+  if (known) return true;
+  const invited = await env.DB.prepare("SELECT 1 FROM invites WHERE email = ? AND status = 'confirmed' AND expires_at > ?").bind(email, now()).first();
+  return Boolean(invited);
+}
+
+async function endPreviousSession(request: Request, env: Env): Promise<void> {
+  const old = await getSession(request, env);
+  if (old) await destroySession(env, old);
 }
 
 function decodeJwtPayload(jwt: string | undefined): Record<string, unknown> | null {
@@ -143,7 +177,11 @@ async function devLogin(request: Request, env: Env, url: URL): Promise<Response>
     const email = String(form.get("email") ?? "");
     const name = String(form.get("name") ?? "");
     try {
+      if (!(await mayUseInstance(env, "dev", email.trim().toLowerCase(), email))) {
+        return page("Not invited", html`<h1>This instance is open to invited people only</h1>`, { status: 403 });
+      }
       const person = await upsertPerson(env.DB, "dev", email.trim().toLowerCase(), email, name);
+      await endPreviousSession(request, env);
       return redirect(returnTo, { "set-cookie": await createSession(env, person.id) });
     } catch (e) {
       if (e instanceof LiaiseError) return page("Sign-in failed", html`<h1>${e.message}</h1>`, { status: 400 });

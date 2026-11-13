@@ -14,11 +14,20 @@ export async function createApproval(
   action: string,
   params: Record<string, unknown>,
 ): Promise<string> {
-  const id = newId("apv");
   const t = now();
+  const json = canonicalJson(params);
+  // Pages that refresh themselves would otherwise mint a new row on every load.
+  const existing = await db
+    .prepare(
+      "SELECT id FROM approvals WHERE person_id = ? AND session_hash = ? AND action = ? AND params = ? AND used_at IS NULL AND expires_at > ? LIMIT 1",
+    )
+    .bind(personId, sessionHash, action, json, t + LIMITS.approvalTtl / 2)
+    .first<{ id: string }>();
+  if (existing) return existing.id;
+  const id = newId("apv");
   await db
     .prepare("INSERT INTO approvals (id, person_id, session_hash, action, params, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .bind(id, personId, sessionHash, action, canonicalJson(params), t, t + LIMITS.approvalTtl)
+    .bind(id, personId, sessionHash, action, json, t, t + LIMITS.approvalTtl)
     .run();
   return id;
 }

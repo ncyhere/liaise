@@ -31,6 +31,7 @@ CREATE TABLE login_attempts (
   nonce TEXT NOT NULL,
   verifier TEXT NOT NULL,
   return_to TEXT NOT NULL,
+  fresh INTEGER NOT NULL DEFAULT 0,   -- asked Google to re-authenticate (max_age=0)
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL
 );
@@ -86,6 +87,7 @@ CREATE TABLE memberships (
   visibility_floor INTEGER NOT NULL,
   joined_at INTEGER NOT NULL,
   left_at INTEGER,
+  hold_every_post INTEGER NOT NULL DEFAULT 0,     -- this person's agents' posts here always wait for them
   PRIMARY KEY (room_id, person_id)
 );
 CREATE INDEX memberships_person ON memberships (person_id);
@@ -98,10 +100,14 @@ CREATE TABLE posts (
   author_id TEXT REFERENCES people (id),          -- NULL for system lines
   connection_id TEXT REFERENCES connections (id),
   connection_label TEXT,
-  body TEXT NOT NULL,
-  body_hash TEXT NOT NULL,
+  body TEXT NOT NULL,                             -- emptied when a held post is rejected, cancelled or expires
+  body_hash TEXT NOT NULL,                        -- HMAC with the server's HASH_KEY, never a plain hash
   reply_to INTEGER,
   status TEXT NOT NULL CHECK (status IN ('held', 'published', 'rejected', 'cancelled', 'expired')),
+  hold_reason TEXT CHECK (hold_reason IN ('needs_approval', 'possible_secret', 'hold_every_post')),
+  secret_rules TEXT,                              -- JSON array of rule ids that matched; never the values
+  scan_context TEXT NOT NULL DEFAULT '[]',        -- JSON [{id, h}]: earlier posts a secret match used
+  scan_rule_version TEXT,
   seq INTEGER,
   membership_version INTEGER NOT NULL,            -- the room's version when the post was written
   created_at INTEGER NOT NULL,
@@ -109,7 +115,8 @@ CREATE TABLE posts (
   decided_at INTEGER,
   decision_note TEXT,                             -- the human's note on a rejection
   UNIQUE (room_id, seq),
-  CHECK ((status = 'published') = (seq IS NOT NULL))
+  CHECK ((status = 'published') = (seq IS NOT NULL)),
+  CHECK (status != 'held' OR hold_reason IS NOT NULL)
 );
 -- One held post per person per room, enforced by the database as well as the code.
 CREATE UNIQUE INDEX posts_one_held ON posts (room_id, author_id) WHERE status = 'held';

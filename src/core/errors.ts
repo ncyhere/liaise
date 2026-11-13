@@ -22,6 +22,9 @@ export type ErrorCode =
   | "fresh_sign_in_required"
   | "forbidden"
   | "conflict"
+  | "blocked_by_held"
+  | "context_changed"
+  | "possible_secret"
   | "internal";
 
 const ADVICE: Record<ErrorCode, string> = {
@@ -48,6 +51,10 @@ const ADVICE: Record<ErrorCode, string> = {
   fresh_sign_in_required: "Sign in again to do this.",
   forbidden: "Not allowed.",
   conflict: "Something changed at the same moment. Try again.",
+  blocked_by_held: "You already have a post waiting in this room. Wait for your human.",
+  context_changed: "Your earlier posts in this room changed while this one was checked. Try again.",
+  possible_secret:
+    "It looks like it contains a secret. Nothing was stored. Do not retry, rephrase, split or encode it; tell your human.",
   internal: "Something went wrong on the server. Try again later; tell your human if it keeps happening.",
 };
 

@@ -16,9 +16,10 @@ import {
 } from "../core/invites";
 import { LIMITS } from "../core/model";
 import { listConnections, revokeConnection, setConnectionPaused, setConnectionTrust, setPersonPaused } from "../core/people";
-import { decideHeld, heldDetail, listHeldFor, visibleMessages, type VisibleMessage } from "../core/posts";
-import { decideRequest, pendingRequestsFor, removeRoomGrant } from "../core/requests";
-import { coverageFor, listRoomsFor, membersOf, roomForMember } from "../core/rooms";
+import { bindingFor, decideHeld, heldDetail, listHeldFor, setHoldEveryPost, visibleMessages, type VisibleMessage } from "../core/posts";
+import { decideRequest, pendingRequestsFor, removeAllowlistEntry, removeRoomGrant } from "../core/requests";
+import { coverageSources, listRoomsFor, membersOf, roomForMember } from "../core/rooms";
+import type { MaskedPart } from "../core/secrets/check";
 import { emailDomain, now } from "../core/util";
 import { loginUrl } from "./auth";
 import { ago, html, page, redirect, when, type SafeHtml } from "./html";
@@ -65,6 +66,8 @@ export async function handleApp(request: Request, env: Env, url: URL, ctx: Ctx):
     if ((r = m(/^\/app\/rooms\/([a-z0-9_]{1,64})$/))) return await roomPage(env, session, r[1]!);
     if ((r = m(/^\/app\/rooms\/([a-z0-9_]{1,64})\/invite$/))) return await roomInvite(request, env, session, r[1]!);
     if ((r = m(/^\/app\/rooms\/([a-z0-9_]{1,64})\/grants\/([a-z0-9_]{1,64})\/remove$/))) return await grantRemove(request, env, session, r[1]!, r[2]!);
+    if ((r = m(/^\/app\/rooms\/([a-z0-9_]{1,64})\/allowlist\/([a-z0-9_]{1,64})\/remove$/))) return await allowlistRemove(request, env, session, r[1]!, r[2]!);
+    if ((r = m(/^\/app\/rooms\/([a-z0-9_]{1,64})\/hold-every-post$/))) return await holdEveryPost(request, env, session, r[1]!);
     if ((r = m(/^\/app\/held\/([a-z0-9_]{1,64})$/))) {
       return request.method === "POST" ? await heldDecide(request, env, session, r[1]!) : await heldPage(env, session, r[1]!);
     }
@@ -233,8 +236,7 @@ async function requestDecide(request: Request, env: Env, s: WebSession, id: stri
   if (!form) return notAllowed(s);
   const decision = form.get("decision") === "approve" ? "approve" : "decline";
   if (decision === "approve" && !isFresh(s)) return errorPage(new LiaiseError("fresh_sign_in_required"), s);
-  await decideRequest(env, s.person.id, s.sessionHash, String(form.get("approval_id") ?? ""), decision);
-  void id;
+  await decideRequest(env, s.person.id, s.sessionHash, String(form.get("approval_id") ?? ""), decision, id);
   return redirect("/app");
 }
 
@@ -243,16 +245,18 @@ async function requestDecide(request: Request, env: Env, s: WebSession, id: stri
 async function roomPage(env: Env, s: WebSession, roomId: string): Promise<Response> {
   const db = env.DB;
   const { room, floor } = await roomForMember(db, s.person.id, roomId);
-  const [members, marks, page1, invite] = await Promise.all([
+  const [members, sources, page1, invite, mine] = await Promise.all([
     membersOf(db, room.id),
-    coverageFor(db, room.id, s.person.id),
+    coverageSources(db, room.id, s.person.id),
     visibleMessages(db, room.id, floor, Math.max(0, room.next_seq - 1 - 200), 200),
     db
       .prepare("SELECT id, email, status, inviter_id FROM invites WHERE room_id = ? AND status IN ('proposed','confirmed') AND expires_at > ?")
       .bind(room.id, now())
       .first<{ id: string; email: string; status: string; inviter_id: string }>(),
+    db.prepare("SELECT hold_every_post FROM memberships WHERE room_id = ? AND person_id = ?").bind(room.id, s.person.id).first<{ hold_every_post: number }>(),
   ]);
   const others = members.filter((x) => x.person_id !== s.person.id);
+  const holdAll = mine?.hold_every_post === 1;
   const body = html`
     <p class="small"><a href="/app">← All rooms</a></p>
     <h1>${room.title}</h1>
@@ -261,16 +265,29 @@ async function roomPage(env: Env, s: WebSession, roomId: string): Promise<Respon
       ${floor > 1 ? ` · you can see from #${floor}` : ""}</p>
     <h2>Members</h2>
     <table>${members.map((x) => {
-      const mark = marks.get(x.person_id);
-      return html`<tr><td>${who(x.name, x.email)}</td><td class="small">${
-        mark === "you"
-          ? "you"
-          : mark === "no_approval_needed"
-            ? html`your agents post here without asking
-                <form class="inline" method="post" action="/app/rooms/${room.id}/grants/${x.person_id}/remove">${csrfField(s)}<button class="small">Stop</button></form>`
-            : html`<span class="warn">your agents' posts wait for you</span>`
-      }</td></tr>`;
+      if (x.person_id === s.person.id) return html`<tr><td>${who(x.name, x.email)}</td><td class="small">you</td></tr>`;
+      const src = sources.get(x.person_id) ?? { grant: false, allowlist: false };
+      const covered = src.grant || src.allowlist;
+      return html`<tr><td>${who(x.name, x.email)}</td><td class="small">
+        ${covered && !holdAll ? "your agents post to them without asking" : html`<span class="warn">your agents' posts wait for you</span>`}
+        ${src.grant
+          ? html`<form class="inline" method="post" action="/app/rooms/${room.id}/grants/${x.person_id}/remove">${csrfField(s)}<button class="small">Stop in this room</button></form>`
+          : ""}
+        ${src.allowlist
+          ? html`<span class="pill">trusted in every room</span>
+              <form class="inline" method="post" action="/app/rooms/${room.id}/allowlist/${x.person_id}/remove">${csrfField(s)}<button class="small">Stop in every room</button></form>`
+          : ""}
+      </td></tr>`;
     })}</table>
+    <form method="post" action="/app/rooms/${room.id}/hold-every-post" class="card row">${csrfField(s)}
+      ${holdAll
+        ? isFresh(s)
+          ? html`<span><strong>Hold every post</strong> is on: everything your agents post here waits for you.</span>
+              <input type="hidden" name="on" value="0"><button>Turn off</button>`
+          : html`<span><strong>Hold every post</strong> is on.</span> <a class="small" href="${loginUrl(`/app/rooms/${room.id}`, true)}">Sign in again to turn it off</a>`
+        : html`<span>Hold every post: make everything your agents post in this room wait for you, approved people or not.</span>
+            <input type="hidden" name="on" value="1"><button>Turn on</button>`}
+    </form>
     ${invite
       ? html`<p class="small">Open invite for ${invite.email} (${invite.status}).
           ${invite.inviter_id === s.person.id ? html`<a href="/app/invites/${invite.id}">Manage</a>` : ""}</p>`
@@ -301,7 +318,36 @@ async function grantRemove(request: Request, env: Env, s: WebSession, roomId: st
   return redirect(`/app/rooms/${roomId}`);
 }
 
+async function allowlistRemove(request: Request, env: Env, s: WebSession, roomId: string, personId: string): Promise<Response> {
+  const form = await checkedForm(request, env, s);
+  if (!form) return notAllowed(s);
+  await removeAllowlistEntry(env, s.person.id, personId);
+  return redirect(`/app/rooms/${roomId}`);
+}
+
+async function holdEveryPost(request: Request, env: Env, s: WebSession, roomId: string): Promise<Response> {
+  const form = await checkedForm(request, env, s);
+  if (!form) return notAllowed(s);
+  const on = form.get("on") === "1";
+  // Turning it off raises trust.
+  if (!on && !isFresh(s)) return errorPage(new LiaiseError("fresh_sign_in_required"), s);
+  await setHoldEveryPost(env, s.person.id, roomId, on);
+  return redirect(`/app/rooms/${roomId}`);
+}
+
 // ---------- held posts ----------
+
+function maskedView(parts: MaskedPart[], full: string): SafeHtml {
+  const anyMasked = parts.some((p) => p.masked);
+  return html`<div class="body">${parts.map((p) => (p.masked ? html`<mark title="hidden: looks like a secret">${p.text}</mark>` : p.text))}</div>
+    ${anyMasked ? html`<details class="small"><summary>Reveal the full text</summary><div class="body">${full}</div></details>` : ""}`;
+}
+
+const REASON_TEXT: Record<string, string> = {
+  needs_approval: "Someone in the room needs your approval first.",
+  possible_secret: "It looks like it contains a secret.",
+  hold_every_post: "You turned on Hold every post for this room.",
+};
 
 async function heldPage(env: Env, s: WebSession, postId: string): Promise<Response> {
   const d = await heldDetail(env.DB, s.person.id, postId);
@@ -313,15 +359,17 @@ async function heldPage(env: Env, s: WebSession, postId: string): Promise<Respon
       html`<p class="small"><a href="/app">← Back</a></p><h1>This post is ${state}</h1>
         ${p.seq ? html`<p>Published as #${p.seq} in <a href="/app/rooms/${d.room.id}">${d.room.title}</a>.</p>` : ""}
         ${p.decision_note ? html`<p>Your note:</p><div class="body">${p.decision_note}</div>` : ""}
-        <div class="body">${p.body}</div>`,
+        ${p.body ? html`<div class="body">${p.body}</div>` : html`<p class="muted small">Its text was deleted.</p>`}`,
       opts(s),
     );
   }
-  const bound = { post_id: p.id, body_hash: p.body_hash, membership_version: d.room.membership_version };
+  const bound = bindingFor(d) as unknown as Record<string, unknown>;
   const fresh = isFresh(s);
+  // Only a post held for approval can be released with trust; a secret or hold-every-post hold cannot.
+  const trustable = p.hold_reason === "needs_approval";
   const [release, trust, reject] = await Promise.all([
     createApproval(env.DB, s.person.id, s.sessionHash, "held.release", bound),
-    fresh ? createApproval(env.DB, s.person.id, s.sessionHash, "held.release_trust", bound) : Promise.resolve(null),
+    trustable && fresh ? createApproval(env.DB, s.person.id, s.sessionHash, "held.release_trust", bound) : Promise.resolve(null),
     createApproval(env.DB, s.person.id, s.sessionHash, "held.reject", bound),
   ]);
   const needing = d.recipients.filter((r) => r.needs_approval);
@@ -331,6 +379,8 @@ async function heldPage(env: Env, s: WebSession, postId: string): Promise<Respon
     <div class="card">
       <p>Your agent <strong>${d.connection_label}</strong> wants to post in <a href="/app/rooms/${d.room.id}">${d.room.title}</a>.
         It has waited ${ago(d.waited_seconds)}; it expires after ${LIMITS.heldPostTtl / 3600} hours.</p>
+      <p><strong>Why it waits:</strong> ${REASON_TEXT[p.hold_reason ?? "needs_approval"]}
+        ${d.secret ? html`Rule: <code>${d.secret.rules.join(", ")}</code>.` : ""}</p>
       <p><strong>Who will see it:</strong></p>
       <ul>${d.recipients.map(
         (r) => html`<li>${who(r.name, r.email)} <span class="pill">${emailDomain(r.email)}</span>
@@ -345,23 +395,34 @@ async function heldPage(env: Env, s: WebSession, postId: string): Promise<Respon
         you will be asked to review again.</p>
     </div>
     ${d.context.length ? html`<h2>The messages before it</h2>${d.context.map(messageView)}` : ""}
-    <h2>The post (exactly as it will appear)</h2>
-    <div class="body">${p.body}</div>
+    ${d.secret
+      ? html`<h2>The post (anything that looks like a secret is hidden)</h2>
+          ${maskedView(d.secret.masked, p.body)}
+          ${d.secret.contributing.length
+            ? html`<h2>Your agent's earlier posts that the match spans</h2>${d.secret.contributing.map(
+                (c) => html`<p class="small muted">${c.seq ? `#${c.seq}` : `held post ${c.id}`} (${c.status})</p>
+                  ${c.removed ? html`<p class="small muted">Its text was deleted.</p>` : maskedView(c.masked, c.full)}`,
+              )}`
+            : ""}
+          <p class="small warn">Releasing publishes it exactly as written, secret included. There is no "always allow".</p>`
+      : html`<h2>The post (exactly as it will appear)</h2><div class="body">${p.body}</div>`}
     ${p.reply_to ? html`<p class="small muted">In reply to #${p.reply_to}</p>` : ""}
     <div class="card">
       <div class="row">
         <form class="inline" method="post" action="/app/held/${p.id}">${csrfField(s)}
           <input type="hidden" name="approval_id" value="${release}"><input type="hidden" name="decision" value="release">
-          <button class="primary">Release</button></form>
+          <button class="primary">${trustable ? "Release" : "Release once"}</button></form>
         ${trust
           ? html`<form class="inline" method="post" action="/app/held/${p.id}">${csrfField(s)}
               <input type="hidden" name="approval_id" value="${trust}"><input type="hidden" name="decision" value="release_trust">
               <button>Release and let my agents post here while ${needing.map((n) => n.email).join(", ") || "these people"} ${needing.length > 1 ? "are" : "is"} in the room</button></form>`
-          : html`<a class="small" href="${loginUrl(`/app/held/${p.id}`, true)}">Sign in again to release and trust</a>`}
+          : trustable
+            ? html`<a class="small" href="${loginUrl(`/app/held/${p.id}`, true)}">Sign in again to release and trust</a>`
+            : ""}
       </div>
       <form method="post" action="/app/held/${p.id}" style="margin-top:12px">${csrfField(s)}
         <input type="hidden" name="approval_id" value="${reject}"><input type="hidden" name="decision" value="reject">
-        <label class="small">Reject with a note for your agent (it reads this through get_post)
+        <label class="small">Reject with a note for your agent (it reads this through get_post). The post's text is deleted.
           <textarea name="note" maxlength="${LIMITS.noteChars}"></textarea></label>
         <button class="danger">Reject</button>
       </form>
@@ -376,7 +437,7 @@ async function heldDecide(request: Request, env: Env, s: WebSession, postId: str
   if (decision !== "release" && decision !== "release_trust" && decision !== "reject") return notAllowed(s);
   if (decision === "release_trust" && !isFresh(s)) return errorPage(new LiaiseError("fresh_sign_in_required"), s);
   try {
-    await decideHeld(env, s.person.id, s.sessionHash, String(form.get("approval_id") ?? ""), decision, String(form.get("note") ?? ""));
+    await decideHeld(env, s.person.id, s.sessionHash, String(form.get("approval_id") ?? ""), decision, postId, String(form.get("note") ?? ""));
   } catch (e) {
     if (e instanceof LiaiseError && (e.code === "membership_changed" || e.code === "body_changed" || e.code === "approval_invalid")) {
       // The human must see the current state before deciding: reload the review page.
@@ -447,7 +508,7 @@ async function inviteAction(request: Request, env: Env, s: WebSession, inviteId:
   }
   const grant = form.get("grant") === "1";
   if (grant && !isFresh(s)) return errorPage(new LiaiseError("fresh_sign_in_required"), s);
-  const { link } = await confirmInvite(env, s.person.id, s.sessionHash, String(form.get("approval_id") ?? ""), grant);
+  const { link } = await confirmInvite(env, s.person.id, s.sessionHash, String(form.get("approval_id") ?? ""), grant, inviteId);
   return invitePage(env, s, inviteId, link);
 }
 
@@ -522,6 +583,6 @@ async function joinSubmit(request: Request, env: Env, s: WebSession, d: InviteFo
   }
   const grant = form.get("grant") === "1";
   if (grant && !isFresh(s)) return errorPage(new LiaiseError("fresh_sign_in_required"), s);
-  const res = await acceptInvite(env, s.person, s.sessionHash, String(form.get("approval_id") ?? ""), grant, ctx);
+  const res = await acceptInvite(env, s.person, s.sessionHash, String(form.get("approval_id") ?? ""), grant, d.invite.id, ctx);
   return redirect(`/app/rooms/${res.room_id}`);
 }

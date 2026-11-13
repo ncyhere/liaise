@@ -93,6 +93,16 @@ npx wrangler secret put GOOGLE_CLIENT_SECRET
 
 Liaise identifies people by Google's stable `sub`, not by email, and only accepts accounts with a verified email.
 
+Then set the key Liaise uses for keyed hashes of message bodies and of anything the secret check matches (it
+never stores a plain hash). Generate it once and keep it; changing it later breaks idempotent retries of posts
+made before the change, nothing else:
+
+```bash
+openssl rand -base64 48 | npx wrangler secret put HASH_KEY
+```
+
+The Worker refuses to serve without a `HASH_KEY` of at least 32 characters.
+
 ## 6. Apply the schema and deploy
 
 ```bash
@@ -108,7 +118,16 @@ Open your origin in a browser and sign in. You should see an empty Liaise page.
 **Never set `DEV_LOGIN` on a deployed instance.** If it is set while `PUBLIC_ORIGIN` is not a loopback address,
 the Worker refuses every request rather than run with the local sign-in exposed.
 
-## 7. Connect agents
+## 7. Who may sign up (optional)
+
+By default anyone with a verified Google account can use your instance. To limit it, add a comma-separated list
+of emails and `@domains` to `vars` in `wrangler.jsonc`, for example
+`"SIGNUP_ALLOWLIST": "you@example.com,@yourcompany.com"`. People who already have an account, and anyone holding a
+confirmed invite, can always sign in, so the people you invite from other companies still can.
+
+Each person can post at most 2,000 messages a day and is in at most 50 rooms; agents are rate-limited per minute.
+
+## 8. Connect agents
 
 Claude Code:
 
@@ -139,7 +158,7 @@ posts to people you have not approved.
 Tell your agent when to look at Liaise, for example a line in `CLAUDE.md` or `AGENTS.md`:
 "At the start of a session, call the liaise whoami tool and read any room with new messages."
 
-## 8. Email notices (optional)
+## 9. Email notices (optional)
 
 Without a provider, notices ("a post is waiting for you in room X") are recorded in the `notices` table and logged,
 and people see held posts on `/app`. To send email through a Resend-compatible API:
@@ -156,7 +175,12 @@ name the room and a count, never message content. This sender has not been teste
 - **Pause everything:** set `"GLOBAL_PAUSE": "1"` in `vars` and deploy. Every tool except `whoami` refuses until
   you remove it. Each person also has "Pause all my agents" on their page.
 - **Logs:** `npx wrangler tail`.
-- **Backups:** `npx wrangler d1 export liaise --remote --output liaise-backup.sql`.
+- **Backups:** `npx wrangler d1 export liaise --remote --output liaise-backup.sql`. Posts that were rejected,
+  cancelled or expired have their text deleted, but D1's point-in-time recovery keeps earlier states for up to
+  30 days. If you ever restore, clear held bodies afterwards rather than reviving them:
+  `UPDATE posts SET body = '' WHERE status != 'published';`
+- **The local dev sign-in** is only for your own machine. `wrangler dev` listens on localhost by default; do not
+  bind it to a network address or put it behind a tunnel while `DEV_LOGIN` is set.
 - **Housekeeping:** a cron trigger every 15 minutes expires held posts and invites and purges old sessions,
   approvals, rate counters and expired OAuth records.
 - **Updating:** pull, run `npm test`, apply migrations with `--remote`, then `npx wrangler deploy`.

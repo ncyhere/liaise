@@ -1,7 +1,9 @@
 import type { AuthRequest, ConsentDescription } from "@cloudflare/workers-oauth-provider";
 import type { Env } from "../env";
 import { createApproval, loadApproval } from "../core/approvals";
+import { LiaiseError } from "../core/errors";
 import { createConnection } from "../core/people";
+import { refuseSecretMetadata } from "../core/rooms";
 import { now, safeLabel } from "../core/util";
 import { loginUrl } from "./auth";
 import { html, page, redirect } from "./html";
@@ -23,19 +25,24 @@ function redirectSource(uri: string): string {
 /** GET /authorize: the consent screen for a new MCP client. */
 export async function authorizePage(request: Request, env: Env, url: URL): Promise<Response> {
   const helpers = env.OAUTH_PROVIDER!;
+  // Sign-in comes first, so an anonymous request cannot make the Worker fetch a client's metadata.
+  const session = await getSession(request, env);
+  const here = url.pathname + url.search;
+  if (!session) return redirect(loginUrl(here));
   let authRequest: AuthRequest;
   let described: ConsentDescription;
   try {
     authRequest = await helpers.parseAuthRequest(request);
     described = await helpers.describeConsent(authRequest);
   } catch (e) {
-    return page("Invalid request", html`<h1>This sign-in request is not valid</h1><p class="muted">${String((e as Error).message ?? e).slice(0, 200)}</p>`, {
-      status: 400,
-    });
+    console.warn("authorize request refused", String((e as Error)?.message ?? e).slice(0, 300));
+    return page(
+      "Invalid request",
+      html`<h1>This sign-in request is not valid</h1><p>Start the connection from your agent again. If it keeps failing, the app may not
+        support this server's sign-in.</p>`,
+      { status: 400, signedInEmail: session.person.email, csrf: session.csrf },
+    );
   }
-  const session = await getSession(request, env);
-  const here = url.pathname + url.search;
-  if (!session) return redirect(loginUrl(here));
   if (!isFresh(session)) {
     return page(
       "Sign in again",
@@ -118,21 +125,46 @@ export async function consentSubmit(request: Request, env: Env): Promise<Respons
   if (!isFresh(session)) return page("Sign in again", html`<h1>Sign in again to connect an agent</h1>`, { status: 403 });
 
   const trust = form.get("trust") === "read_only" ? "read_only" : "gated";
+  const label = String(form.get("label") ?? "");
+  try {
+    refuseSecretMetadata("label", label);
+  } catch (e) {
+    if (e instanceof LiaiseError) {
+      return page("Choose another label", html`<h1>Choose another label</h1><p>${e.message} Start the connection from your agent again.</p>`, {
+        status: 400,
+        signedInEmail: session.person.email,
+        csrf: session.csrf,
+      });
+    }
+    throw e;
+  }
   const connection = await createConnection(env.DB, session.person.id, {
     clientId: ar.clientId,
     clientName: params.clientName,
     clientDomain: params.clientDomain,
     redirectUri: params.redirectUri,
-    label: String(form.get("label") ?? ""),
+    label,
     trust,
   });
-  const { redirectTo } = await env.OAUTH_PROVIDER!.completeAuthorization({
-    request: ar,
-    userId: session.person.id,
-    metadata: { connectionId: connection.id, label: connection.label },
-    scope: ar.scope,
-    props: { personId: session.person.id, connectionId: connection.id },
-  });
+  let redirectTo: string;
+  try {
+    ({ redirectTo } = await env.OAUTH_PROVIDER!.completeAuthorization({
+      request: ar,
+      userId: session.person.id,
+      metadata: { connectionId: connection.id, label: connection.label },
+      scope: ar.scope,
+      props: { personId: session.person.id, connectionId: connection.id },
+    }));
+  } catch (e) {
+    // No grant was made: do not leave a connection behind that looks usable.
+    await env.DB.prepare("UPDATE connections SET revoked_at = ?, revoked_reason = 'authorization failed' WHERE id = ?").bind(now(), connection.id).run();
+    console.error("completeAuthorization failed", String((e as Error)?.message ?? e).slice(0, 300));
+    return page("Could not connect", html`<h1>Could not connect the agent</h1><p>Start the connection from your agent again.</p>`, {
+      status: 500,
+      signedInEmail: session.person.email,
+      csrf: session.csrf,
+    });
+  }
   // completeAuthorization replaces earlier grants for this person and client; mirror that here.
   await env.DB.prepare(
     `UPDATE connections SET revoked_at = ?, revoked_reason = 'replaced by a new sign-in'

@@ -70,6 +70,8 @@ export interface PageOptions {
 
 export function securityHeaders(formAction: string[] = []): Record<string, string> {
   return {
+    // Ignored by browsers on http://localhost; enforced once deployed on https.
+    "strict-transport-security": "max-age=31536000; includeSubDomains",
     "content-security-policy": [
       "default-src 'none'",
       "style-src 'unsafe-inline'",

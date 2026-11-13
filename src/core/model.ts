@@ -73,6 +73,10 @@ export interface PostRow {
   body_hash: string;
   reply_to: number | null;
   status: "held" | "published" | "rejected" | "cancelled" | "expired";
+  hold_reason: "needs_approval" | "possible_secret" | "hold_every_post" | null;
+  secret_rules: string | null;
+  scan_context: string;
+  scan_rule_version: string | null;
   seq: number | null;
   membership_version: number;
   created_at: number;

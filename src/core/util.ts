@@ -114,3 +114,16 @@ export function canonicalJson(value: unknown): string {
     .map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
     .join(",")}}`;
 }
+
+const hmacKeys = new Map<string, Promise<CryptoKey>>();
+
+/** HMAC-SHA-256 with the server's HASH_KEY, base64url. Used instead of plain hashes everywhere. */
+export async function keyedHash(secret: string, text: string): Promise<string> {
+  let key = hmacKeys.get(secret);
+  if (!key) {
+    key = crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    hmacKeys.set(secret, key);
+  }
+  const sig = await crypto.subtle.sign("HMAC", await key, new TextEncoder().encode(text));
+  return base64url(sig);
+}

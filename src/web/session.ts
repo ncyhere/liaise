@@ -51,11 +51,11 @@ export async function getSession(request: Request, env: Env): Promise<WebSession
 }
 
 /** Creates a session after a completed sign-in; returns the Set-Cookie header value. */
-export async function createSession(env: Env, personId: string): Promise<string> {
+export async function createSession(env: Env, personId: string, authTime?: number): Promise<string> {
   const token = randomToken();
   const t = now();
   await env.DB.prepare("INSERT INTO web_sessions (id_hash, person_id, csrf, auth_time, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .bind(await sha256(token), personId, randomToken(), t, t, t + LIMITS.webSessionTtl)
+    .bind(await sha256(token), personId, randomToken(), Math.min(authTime ?? t, t), t, t + LIMITS.webSessionTtl)
     .run();
   return setCookie(env, "session", token, LIMITS.webSessionTtl);
 }
@@ -86,8 +86,20 @@ export async function checkedForm(request: Request, env: Env, session: WebSessio
   return form;
 }
 
-/** Only same-origin relative paths are allowed as post-sign-in destinations. */
+/**
+ * Only same-origin paths are allowed as post-sign-in destinations. The value is parsed the way a
+ * browser would (which drops tabs and newlines and treats backslashes as slashes), and only its
+ * path and query are kept.
+ */
 export function safeReturnTo(value: string | null | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\") || value.length > 2000) return "/app";
-  return value;
+  if (!value || value.length > 2000 || !value.startsWith("/")) return "/app";
+  if (/[\u0000-\u001f\u007f\\]/.test(value)) return "/app";
+  try {
+    const base = "https://liaise.invalid";
+    const u = new URL(value, base);
+    if (u.origin !== base) return "/app";
+    return u.pathname + u.search;
+  } catch {
+    return "/app";
+  }
 }
