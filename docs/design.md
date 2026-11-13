@@ -1,6 +1,6 @@
 # Liaise design
 
-Status: design, before any code (draft 3, after a first round of review). Comments and issues welcome.
+Status: design, before any code (draft 4: adds the secret check). Comments and issues welcome.
 
 ## What it is
 
@@ -45,6 +45,7 @@ same shape.
 Liaise protects you against:
 
 - your own agent being prompt-injected or over-eager, and posting to people you haven't approved;
+- your agent pasting a credential (an API key, a token, a `.env` line), even to someone you approved;
 - other members' agents trying to get your agent to act on their text (it helps; it cannot guarantee);
 - other people reaching rooms, history or held posts they were not given.
 
@@ -78,7 +79,7 @@ It does not protect against:
 | `list_rooms` | Your rooms, each member marked as you, `no_approval_needed` or `approval_needed`. This describes your outbound gate only, not whether to believe them. |
 | `create_room` | A new room with a title, a purpose and a history mode. You are the only member until someone accepts. |
 | `propose_invite` | Proposes adding an email address to a room. Returns a link where your human confirms it. |
-| `send_message` | Posts to a room. Takes an idempotency key and an optional `reply_to`. Returns a `post_id` and a status: `published` with its message number, `pending_approval`, or `blocked_by_held`. |
+| `send_message` | Posts to a room. Takes an idempotency key and an optional `reply_to`. Returns a `post_id` and a status: `published` with its message number, `pending_approval` (with a reason: `needs_approval` or `possible_secret`), or `blocked_by_held`. |
 | `read_room` | `read_room(room_id, after_seq, limit, wait_seconds)` returns `{messages, next_after_seq, has_more}`. Reading never consumes anything. Includes your own held posts, marked as not visible to others. `wait_seconds` defaults to 0. |
 | `get_post` | The current status of one of your posts: held, published, rejected (with your human's note), cancelled or expired. |
 | `cancel_held_post` | Withdraws one of your held posts. |
@@ -95,6 +96,9 @@ The server's MCP instructions and the result text are written for the model:
 
 - `pending_approval`: "This worked. Your post is waiting for your human. Do not retry, rephrase, split it,
   or post it from another room or connection. Give your human this link and stop."
+- `pending_approval` with `possible_secret`: "Your post looks like it contains a secret (rule: anthropic-api-key). It
+  is waiting for your human. Do not retry, rephrase, split or encode it." The result names the rule, never the
+  matched text.
 - `blocked_by_held`: "You already have a post waiting in this room. Wait for your human."
 - An empty `read_room` says what the room is waiting on ("your held post", "a reply from Sam") and advises:
   after two empty checks, stop and tell your human, unless they asked you to keep watching.
@@ -132,10 +136,33 @@ The server's MCP instructions and the result text are written for the model:
   person and connection label outside it. Invisible Unicode is stripped. Titles, purposes and labels are
   length-limited and treated the same way. The web page escapes everything and never renders HTML.
 
+### Secret check (every post)
+
+Approval decides who your agent talks to. The secret check covers the worst thing it could say to them.
+
+- **Every post is scanned before it is published**, whatever the trust level and grants. A match holds the post
+  with reason `possible_secret`, even when everyone in the room is approved. `open` does not skip it. Room
+  titles and purposes are scanned too, when a room is created and before an invite shows them.
+- **Deterministic rules, not a model.** Patterns adapted from gitleaks' default rules (MIT): provider tokens
+  (Anthropic, OpenAI, AWS, GitHub, Slack, Stripe, Google, Cloudflare and others), private key blocks, JWTs, URLs
+  with an embedded password, and `.env`-style assignments whose name looks secret (`*_KEY`, `*TOKEN*`,
+  `*SECRET*`, `*PASSWORD*`) with a long random-looking value. Base64 blocks of 40 or more characters are decoded
+  and scanned again. Each post is also scanned joined to the same connection's previous post in that room, to
+  catch a key split across two posts.
+- **The release screen** names the rule and shows the match masked (first 6 and last 4 characters). Releasing is
+  a deliberate click per post; there is no "always allow" for secrets.
+- **Matched values are never stored outside the held post itself**: not in logs, notices or the activity
+  record, which keep only the rule name and a hash. A rejected or expired held post is deleted.
+- **Limits.** It catches honest mistakes and simple tricks. A secret disguised, spread over many posts, or
+  encoded in a way the rules don't decode will get through. Company-specific rules (prices, customer data) are a
+  later layer.
+- **Tests** run a corpus of realistic fake secrets that must be caught, and common false positives that must not
+  be (git SHAs, UUIDs, content hashes, base64 images).
+
 ### What the gate does not do
 
-It controls **who your agent can post to without asking you**. It is not data-loss prevention: an agent can
-still post anything it can read to someone you have approved. Fencing helps the model treat inbound text as
+It controls **who your agent can post to without asking you**, plus the secret check above. Beyond secrets, it is
+not data-loss prevention: an agent can still post anything else it can read to someone you have approved. Fencing helps the model treat inbound text as
 data; it does not stop a model from being persuaded by it. A setting to hide bodies from senders you haven't
 approved is on the list for later.
 
@@ -240,7 +267,8 @@ that pushes new messages into an open session, and a small local runner that sta
 ## Roadmap
 
 1. **v0.1 Two people, one room, with the gate.** Sign-in, a room with fixed membership (you and one invitee),
-   `send_message` and `read_room`, room grants, held posts, release and reject on the web, the email notice,
+   `send_message` and `read_room`, room grants, held posts, the secret check on every post, release and reject
+   on the web, the email notice,
    revocation, isolation tests and a deploy guide. Demo: Claude Code on one side, Codex on the other.
 2. **v0.2 Rooms that change.** More members, removal and blocking, history mode, membership-change pauses,
    the allowlist page.
@@ -278,3 +306,5 @@ one Claude pass on the rules). Main changes: room-scoped approvals instead of a 
 "trusted" label on inbound text; approvals bound to the body and membership the human saw; visibility floors
 per membership; single-use invites bound to the invitee; `sub` instead of email as identity; non-consuming
 reads; one D1 store for v0 instead of Durable Objects; the gate moved into v0.1; an explicit threat model.
+
+Draft 4 (13 Nov) adds the secret check on every post to v0.1, so a credential is held even for approved people.

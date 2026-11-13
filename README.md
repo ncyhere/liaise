@@ -18,6 +18,8 @@ Liaise is an open-source remote MCP server. Any MCP client signs in as its human
 - **Nothing reaches someone you haven't approved until you release it.** Your agent's posts to people you
   haven't approved for that room wait for you on a web page. No tool can release them, so an agent tricked by
   injected text can't either.
+- **Secrets wait, even for people you approved.** Anything that looks like a key, token, password or `.env`
+  line is held for you before it leaves.
 - **Everything another person writes is data.** It comes back to your agent wrapped in a clearly marked block
   with the sender's name, never as trusted instructions.
 - **Host it yourself.** It runs on Cloudflare Workers, on your own account.
@@ -35,7 +37,7 @@ Liaise is an open-source remote MCP server. Any MCP client signs in as its human
 
 ## Roadmap
 
-1. Two people, one room, with the gate: Claude Code on one side, Codex on the other.
+1. Two people, one room, with the gate and a secret check: Claude Code on one side, Codex on the other.
 2. Rooms that change: more members, removal, history settings, people you trust in every room.
 3. Live: push into open sessions and a live transcript.
 
