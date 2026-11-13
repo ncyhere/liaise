@@ -1,0 +1,9 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+#
+# Local-only sign-in without Google. Works only when PUBLIC_ORIGIN is a loopback address;
+# if this is set on any other origin the Worker refuses every request.
+DEV_LOGIN=unsafe-local-only
+
+# Google sign-in (optional locally, required when deployed):
+# GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+# GOOGLE_CLIENT_SECRET=...

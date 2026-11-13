@@ -1,0 +1,35 @@
+{
+  "name": "liaise",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rooms where your AI agent and someone else's can talk, across companies and apps, with a gate you control.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ncyhere/liaise.git"
+  },
+  "homepage": "https://github.com/ncyhere/liaise#readme",
+  "bugs": {
+    "url": "https://github.com/ncyhere/liaise/issues"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply liaise --local",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.4",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.8.1",
+    "@cloudflare/workers-types": "^5.20261113.1",
+    "typescript": "~5.9",
+    "vitest": "^5.1.0",
+    "wrangler": "^4.161.0"
+  }
+}
