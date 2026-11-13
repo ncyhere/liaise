@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "liaise",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // nodejs_compat: the MCP SDK uses a few Node built-ins.
+  // global_fetch_strictly_public: required by the OAuth library for Client ID Metadata Documents,
+  // and keeps a fetched client_id URL from reaching private addresses.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "liaise",
+      // Replace with the id from `wrangler d1 create liaise` before deploying (docs/deploy.md).
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      // Replace with the id from `wrangler kv namespace create OAUTH_KV` before deploying.
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "vars": {
+    // The one origin this instance answers on, e.g. "https://liaise.example.com". No trailing slash.
+    "PUBLIC_ORIGIN": "http://localhost:8787"
+  },
+  "observability": { "enabled": true }
+}

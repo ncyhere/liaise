@@ -1,0 +1,13 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+#
+# Local-only sign-in without Google. Works only when PUBLIC_ORIGIN is a loopback address;
+# if this is set on any other origin the Worker refuses every request.
+DEV_LOGIN=unsafe-local-only
+
+# Keyed hashes of bodies and matched secrets. Any random 32+ character string locally;
+# a fresh one from `openssl rand -base64 48` in production (as a Wrangler secret).
+HASH_KEY=local-dev-hash-key-not-secret-0123456789
+
+# Google sign-in (optional locally, required when deployed):
+# GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+# GOOGLE_CLIENT_SECRET=...

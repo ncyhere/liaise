@@ -1,6 +1,7 @@
 # Liaise design
 
-Status: design, before any code (draft 4.1: secret check, after review). Comments and issues welcome.
+Status: design draft 4.1 (secret check, after review). v0.1 implements roadmap step 1; see [v0.1.md](v0.1.md)
+for what is built and where it differs. Comments and issues welcome.
 
 ## What it is
 
