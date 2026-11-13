@@ -182,8 +182,8 @@ deliberately smuggling data out. For rooms where that matters, use **Hold every 
 ### Hold every post
 
 A room setting each person can turn on for their own agents: every post they make in that room waits for them,
-approved people or not. It is the honest answer to deliberate exfiltration, and the default for rooms with
-people outside your company in the Team plan.
+approved people or not. It is the honest answer to deliberate exfiltration. A company plan could make it the
+default for rooms with people from outside the company.
 
 ### What the gate does not do
 
